@@ -1,0 +1,124 @@
+name: Debug Genetik
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_name:
+        description: "Nama project ZIP (tanpa .zip)"
+        required: true
+        type: string
+      build_mode:
+        description: "Debug Genetik"
+        required: true
+        default: "debug"
+        type: string
+      chat_id:
+        description: "Telegram chat_id penerima APK"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Download ZIP project
+        run: |
+          curl -L -o project.zip "https://raw.githubusercontent.com/${{ github.repository }}/main/${{ github.event.inputs.project_name }}.zip"
+          ls -la project.zip
+
+      - name: Extract project
+        run: |
+          mkdir -p project
+          unzip -q project.zip -d project
+          if [ -d "project/project" ]; then
+            mv project/project/* project/ 2>/dev/null || true
+          fi
+          ls -la project/
+
+      - name: Verify pubspec.yaml
+        run: |
+          if [ ! -f "project/pubspec.yaml" ]; then
+            echo "❌ pubspec.yaml tidak ditemukan!"
+            exit 1
+          fi
+          echo "✅ pubspec.yaml ketemu"
+
+      - name: Flutter pub get
+        working-directory: ./project
+        run: flutter pub get
+
+      - name: Build APK split per ABI (Debug)
+        working-directory: ./project
+        run: flutter build apk --debug --split-per-abi
+
+      - name: Find APKs
+        id: find_apk
+        run: |
+          APK_DIR="project/build/app/outputs/flutter-apk"
+          APK_LIST=$(find $APK_DIR -name "*.apk" | tr '\n' ' ')
+          if [ -z "$APK_LIST" ]; then
+            echo "❌ APK tidak ditemukan!"
+            exit 1
+          fi
+          echo "apk_list=$APK_LIST" >> $GITHUB_OUTPUT
+          echo "apk_dir=$APK_DIR" >> $GITHUB_OUTPUT
+          echo "✅ APK list: $APK_LIST"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.project_name }}-debug-genetik
+          path: project/build/app/outputs/flutter-apk/*.apk
+          retention-days: 7
+
+      - name: Send APKs to Telegram
+        if: success()
+        run: |
+          BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          CHAT_ID="${{ github.event.inputs.chat_id }}"
+          APK_DIR="${{ steps.find_apk.outputs.apk_dir }}"
+          PROJECT="${{ github.event.inputs.project_name }}"
+
+          for APK in $APK_DIR/*.apk; do
+            APK_NAME=$(basename "$APK")
+            APK_SIZE=$(stat -c%s "$APK")
+            APK_SIZE_MB=$(echo "scale=2; $APK_SIZE/1024/1024" | bc)
+
+            CAPTION="✅ <b>APK REALES — SUKSES</b>%0A%0A📦 <b>Project:</b> ${PROJECT}%0A📱 <b>File:</b> ${APK_NAME}%0A📊 <b>Size:</b> ${APK_SIZE_MB} MB%0A⚙️ <b>Mode:</b> DEBUG GENETIK%0A🕐 <b>Build:</b> $(date +'%d/%m/%Y %H:%M') WIB%0A%0A🚀 <b>WENZYX AI V8 — PASUKAN TEKNOLOGI</b>"
+
+            curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@${APK}" \
+              -F "caption=${CAPTION}" \
+              -F "parse_mode=HTML"
+
+            sleep 2
+          done
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          CHAT_ID="${{ github.event.inputs.chat_id }}"
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT_ID}" \
+            -d "text=❌ Build APK DEBUG GENETIK GAGAL.%0ACek log di GitHub Actions." \
+            -d "parse_mode=HTML"
